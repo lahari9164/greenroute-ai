@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GreenRoute AI</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { font-family: Arial, sans-serif; background: #eef7ee; margin: 0; }
+    header { padding: 12px 16px; }
+    h1 { color: #2e7d32; margin: 0; font-size: 22px; }
+    #map { height: 55vh; min-height: 300px; }
+    .panel { background: white; padding: 16px; }
+    label { display: block; margin-top: 10px; font-weight: bold; font-size: 14px; }
+    input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; }
+    button { margin-top: 12px; padding: 10px 14px; background: #2e7d32; color: white; border: none; border-radius: 8px; cursor: pointer; }
+    #result { margin-top: 12px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🌱 GreenRoute AI</h1>
+    <p>Click the map to set your start, then your destination.</p>
+  </header>
+
+  <div id="map"></div>
+
+  <section class="panel">
+    <p id="status">Click the map to pick your starting point.</p>
+    <label>Time available (minutes)</label>
+    <input id="time" type="number" value="45" />
+    <label>Budget (₹)</label>
+    <input id="budget" type="number" value="100" />
+    <button id="reset">Reset</button>
+    <div id="result"></div>
+  </section>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map("map").setView([12.9716, 77.5946], 12);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    let points = [];
+    let layers = [];
+    const status = document.getElementById("status");
+    const result = document.getElementById("result");
+
+    map.on("click", async (e) => {
+      if (points.length === 2) return;
+      const p = [e.latlng.lat, e.latlng.lng];
+      points.push(p);
+      layers.push(
+        L.marker(p).addTo(map)
+          .bindPopup(points.length === 1 ? "Start" : "Destination")
+          .openPopup()
+      );
+
+      if (points.length === 1) {
+        status.textContent = "Now click your destination.";
+        return;
+      }
+
+      status.textContent = "Finding route...";
+      try {
+        const [a, b] = points;
+        const url = `https://router.project-osrm.org/route/v1/driving/${a[1]},${a[0]};${b[1]},${b[0]}?overview=full&geometries=geojson`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.code !== "Ok") throw new Error("No route");
+
+        const route = data.routes[0];
+        const line = L.geoJSON(route.geometry, {
+          style: { color: "#2e7d32", weight: 6 }
+        }).addTo(map);
+        layers.push(line);
+        map.fitBounds(line.getBounds(), { padding: [30, 30] });
+
+        const km = (route.distance / 1000).toFixed(1);
+        status.textContent = "Route found!";
+        result.textContent = `Distance: ${km} km`;
+      } catch (err) {
+        status.textContent = "Could not find a route. Click Reset and try again.";
+        console.error(err);
+      }
+    });
+
+    document.getElementById("reset").addEventListener("click", () => {
+      points = [];
+      layers.forEach((l) => map.removeLayer(l));
+      layers = [];
+      result.textContent = "";
+      status.textContent = "Click the map to pick your starting point.";
+    });
+  </script>
+</body>
+</html>
