@@ -9,30 +9,42 @@
     body { font-family: Arial, sans-serif; background: #eef7ee; margin: 0; }
     header { padding: 12px 16px; }
     h1 { color: #2e7d32; margin: 0; font-size: 22px; }
-    #map { height: 55vh; min-height: 300px; }
+    #map { height: 40vh; min-height: 250px; }
     .panel { background: white; padding: 16px; }
     label { display: block; margin-top: 10px; font-weight: bold; font-size: 14px; }
     input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; }
-    button { margin-top: 12px; padding: 10px 14px; background: #2e7d32; color: white; border: none; border-radius: 8px; cursor: pointer; }
-    #result { margin-top: 12px; font-weight: bold; }
+    button { width: 100%; margin-top: 14px; padding: 12px; background: #2e7d32; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+    #status { font-size: 14px; color: #555; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+    th, td { padding: 8px 4px; border-bottom: 1px solid #ddd; text-align: left; }
+    .best { background: #e3f5e3; }
+    #pick { margin-top: 12px; padding: 12px; background: #e3f5e3; border-radius: 8px; font-weight: bold; }
+    .note { font-size: 12px; color: #777; margin-top: 8px; }
   </style>
 </head>
 <body>
   <header>
     <h1>🌱 GreenRoute AI</h1>
-    <p>Click the map to set your start, then your destination.</p>
+    <p>The most sustainable route you'll actually take.</p>
   </header>
 
   <div id="map"></div>
 
   <section class="panel">
-    <p id="status">Click the map to pick your starting point.</p>
+    <label>Start</label>
+    <input id="start" placeholder="e.g. Indiranagar, Bengaluru" />
+    <label>Destination</label>
+    <input id="destination" placeholder="e.g. MG Road, Bengaluru" />
     <label>Time available (minutes)</label>
     <input id="time" type="number" value="45" />
     <label>Budget (₹)</label>
     <input id="budget" type="number" value="100" />
-    <button id="reset">Reset</button>
-    <div id="result"></div>
+
+    <button id="go">Compare routes</button>
+    <p id="status"></p>
+    <div id="results"></div>
+    <div id="pick"  style="display:none"></div>
+    <p class="note">All times, costs and CO₂ values are rough estimates.</p>
   </section>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -42,56 +54,101 @@
       attribution: "&copy; OpenStreetMap contributors"
     }).addTo(map);
 
-    let points = [];
     let layers = [];
     const status = document.getElementById("status");
-    const result = document.getElementById("result");
+    const results = document.getElementById("results");
+    const pick = document.getElementById("pick");
 
-    map.on("click", async (e) => {
-      if (points.length === 2) return;
-      const p = [e.latlng.lat, e.latlng.lng];
-      points.push(p);
-      layers.push(
-        L.marker(p).addTo(map)
-          .bindPopup(points.length === 1 ? "Start" : "Destination")
-          .openPopup()
-      );
+    // Rough estimates, we label these as estimates in the app
+    const MODES = [
+      { name: "Walk",             icon: "🚶", speed: 5,  perKm: 0,  minCost: 0,  co2: 0 },
+      { name: "Cycle",            icon: "🚲", speed: 15, perKm: 0,  minCost: 0,  co2: 0 },
+      { name: "Public transport", icon: "🚌", speed: 20, perKm: 2,  minCost: 10, co2: 60 },
+      { name: "Car",              icon: "🚗", speed: 25, perKm: 10, minCost: 0,  co2: 170 }
+    ];
 
-      if (points.length === 1) {
-        status.textContent = "Now click your destination.";
+    async function geocode(q) {
+      const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=in" +
+        "&viewbox=77.4,13.2,77.8,12.8&q=" + encodeURIComponent(q);
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!data.length) throw new Error("Place not found: " + q);
+      return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+    }
+
+    document.getElementById("go").addEventListener("click", async () => {
+      const startText = document.getElementById("start").value.trim();
+      const destText = document.getElementById("destination").value.trim();
+      const timeAvail = Number(document.getElementById("time").value);
+      const budget = Number(document.getElementById("budget").value);
+
+      if (!startText || !destText) {
+        status.textContent = "Please type both a start and a destination.";
         return;
       }
 
-      status.textContent = "Finding route...";
+      layers.forEach((l) => map.removeLayer(l));
+      layers = [];
+      results.innerHTML = "";
+      pick.style.display = "none";
+
       try {
-        const [a, b] = points;
-        const url = `https://router.project-osrm.org/route/v1/driving/${a[1]},${a[0]};${b[1]},${b[0]}?overview=full&geometries=geojson`;
+        status.textContent = "Finding places...";
+        const a = await geocode(startText);
+        const b = await geocode(destText);
+
+        status.textContent = "Finding route...";
+        const url = `https://router.project-osrm.org/route/v1/driving/${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
         const res = await fetch(url);
         const data = await res.json();
-        if (data.code !== "Ok") throw new Error("No route");
+        if (data.code !== "Ok") throw new Error("No route found");
 
         const route = data.routes[0];
-        const line = L.geoJSON(route.geometry, {
-          style: { color: "#2e7d32", weight: 6 }
-        }).addTo(map);
+        const km = route.distance / 1000;
+
+        layers.push(L.marker([a.lat, a.lon]).addTo(map).bindPopup("Start"));
+        layers.push(L.marker([b.lat, b.lon]).addTo(map).bindPopup("Destination"));
+        const line = L.geoJSON(route.geometry, { style: { color: "#2e7d32", weight: 6 } }).addTo(map);
         layers.push(line);
         map.fitBounds(line.getBounds(), { padding: [30, 30] });
 
-        const km = (route.distance / 1000).toFixed(1);
-        status.textContent = "Route found!";
-        result.textContent = `Distance: ${km} km`;
+        // Compare the 4 modes
+        const carCo2 = 170 * km;
+        const rows = MODES.map((m) => {
+          const mins = Math.round((km / m.speed) * 60);
+          const cost = Math.round(Math.max(m.minCost, m.perKm * km));
+          const co2g = m.co2 * km;
+          return {
+            ...m, mins, cost, co2g,
+            saved: (carCo2 - co2g) / 1000,
+            fits: mins <= timeAvail && cost <= budget
+          };
+        });
+
+        // Simple rule for now: lowest CO2 among options that fit time and budget
+        const fitting = rows.filter((r) => r.fits).sort((x, y) => x.co2g - y.co2g);
+        const best = fitting[0];
+
+        let html = `<p><b>Distance: ${km.toFixed(1)} km</b></p><table>
+          <tr><th>Mode</th><th>Time</th><th>Cost</th><th>CO₂</th><th>Fits?</th></tr>`;
+        rows.forEach((r) => {
+          html += `<tr class="${best && best.name === r.name ? "best" : ""}">
+            <td>${r.icon} ${r.name}</td><td>${r.mins} min</td><td>₹${r.cost}</td>
+            <td>${(r.co2g / 1000).toFixed(2)} kg</td><td>${r.fits ? "✅" : "❌"}</td></tr>`;
+        });
+        html += "</table>";
+        results.innerHTML = html;
+
+        pick.style.display = "block";
+        pick.textContent = best
+          ? `Greenest option that fits: ${best.icon} ${best.name} (saves about ${best.saved.toFixed(2)} kg CO₂ vs driving)`
+          : "Nothing fits your time and budget. Try more time or a bigger budget.";
+
+        status.textContent = "";
       } catch (err) {
-        status.textContent = "Could not find a route. Click Reset and try again.";
+        status.textContent = err.message + ". Try adding ', Bengaluru' to the place name.";
         console.error(err);
       }
-    });
-
-    document.getElementById("reset").addEventListener("click", () => {
-      points = [];
-      layers.forEach((l) => map.removeLayer(l));
-      layers = [];
-      result.textContent = "";
-      status.textContent = "Click the map to pick your starting point.";
     });
   </script>
 </body>
